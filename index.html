@@ -391,13 +391,14 @@ svg.mini .frame{stroke-width:14}
 <div class="wrap" id="homeView">
   <header class="top">
     <div>
-      <div class="kicker">MEP progress tracker · <span id="appVer">v1.1</span></div>
+      <div class="kicker">MEP progress tracker · <span id="appVer">v1.2</span></div>
       <h1>Projects</h1>
     </div>
     <div class="row">
       <button type="button" class="btn primary" id="gdBtn">Google Drive</button>
       <button type="button" class="btn" id="backupBtn">Save backup (JSON)</button>
       <button type="button" class="btn" id="restoreBtn">Restore from backup</button>
+      <button type="button" class="btn" id="sbOut" hidden>Sign out</button>
       <input type="file" id="restoreFile" accept="application/json,.json" hidden>
     </div>
   </header>
@@ -681,7 +682,7 @@ function defaultVillas(){
 var KEY='taormina-mep-map-v2';
 var S={icons:false,acts:null,villas:null,mode:'maps',cur:'all',showAll:false,sel:null,hl:null,zoom:1,paint:false,numbers:false,labels:true,edit:false,confirmDel:null,pop:null,blockSort:'th'};
 /* app version: bump on every update (major.minor.patch) */
-var APP_VER='1.1',APP_DATE='12 Nov 2026';
+var APP_VER='1.2',APP_DATE='12 Nov 2026';
 var PROJ=null,STORE={v:1,order:[]},IDXK='taormina-projects-v1';
 var TAO_META={desc:'Taormina Village-1, Townhouses Community (G+2)',owner:'Reportage Prime Properties',consultant:'IEB Architectural Design Consultancy',contractor:'Modun Gulf Building Contracting L.L.C.'};
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
@@ -3057,6 +3058,70 @@ async function initShare(){
 }
 
 
+
+/* ================= Supabase cloud saving (used when the file is opened outside claude.ai, e.g. GitHub Pages) ================= */
+var SUPA={url:'https://tnyvxhqsrsgtvjszljzb.supabase.co',key:'sb_publishable_6lDeOh7KEZNYVCgSgTW3sg_XozxHz3Y',table:'projects'};
+var SB=null;
+function sbLogin(){
+  return new Promise(function(res){
+    var m=document.createElement('div');m.className='modal';m.style.zIndex=90;
+    var inp='width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)';
+    m.innerHTML='<div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="sbT"><div class="pop-h"><b id="sbT">Sign in</b></div><div class="note">Sign in to open and save your projects in the cloud.</div><label class="note">Email<br><input type="email" id="sbE" autocomplete="username" style="'+inp+'"></label><label class="note">Password<br><input type="password" id="sbP" autocomplete="current-password" style="'+inp+'"></label><div class="row" style="margin-top:10px"><button type="button" class="btn primary" id="sbGo">Sign in</button></div><div class="note" id="sbM" aria-live="polite"></div></div>';
+    document.body.appendChild(m);
+    function go(){
+      var e=m.querySelector('#sbE').value.trim(),p=m.querySelector('#sbP').value;
+      if(!e||!p){m.querySelector('#sbM').textContent='Enter your email and password.';return;}
+      m.querySelector('#sbM').textContent='Signing in...';
+      SB.auth.signInWithPassword({email:e,password:p}).then(function(r){
+        if(r.error){m.querySelector('#sbM').textContent='Sign in failed: '+r.error.message;return;}
+        m.remove();res();
+      },function(){m.querySelector('#sbM').textContent='Could not reach Supabase. Check your connection.';});
+    }
+    m.querySelector('#sbGo').onclick=go;
+    m.addEventListener('keydown',function(ev){if(ev.key==='Enter')go();});
+    setTimeout(function(){m.querySelector('#sbE').focus();},50);
+  });
+}
+async function initSupabase(){
+  try{
+    await loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js');
+    SB=window.supabase.createClient(SUPA.url,SUPA.key);
+    var ses=(await SB.auth.getSession()).data.session;
+    if(!ses)await sbLogin();
+  }catch(e){syncMsg('Cloud saving could not start. Projects are kept in this browser only.');return;}
+  var T=SUPA.table;
+  function chk(r){if(r&&r.error)throw r.error;return r;}
+  DBH={
+    doc:function(path){return {
+      set:async function(o){chk(await SB.from(T).upsert({id:path,data:o,updated_at:new Date().toISOString()}));},
+      get:async function(){var r=chk(await SB.from(T).select('data').eq('id',path).maybeSingle());return {exists:!!r.data,data:function(){return r.data&&r.data.data;}};},
+      delete:async function(){chk(await SB.from(T).delete().eq('id',path));}
+    };},
+    collection:function(name){return {onSnapshot:function(cb,err){
+      var last=null,stop=false;
+      async function poll(){
+        if(stop||document.hidden)return;
+        try{
+          var l=chk(await SB.from(T).select('id,updated_at').like('id',name+'/%'));
+          var sig=(l.data||[]).map(function(x){return x.id+'@'+x.updated_at;}).sort().join('|');
+          if(sig===last)return;
+          var f=chk(await SB.from(T).select('id,data').like('id',name+'/%'));
+          last=sig;
+          cb({docs:(f.data||[]).map(function(x){return {id:x.id.slice(name.length+1),data:function(){return x.data;}};})});
+        }catch(e){if(err)err(e);}
+      }
+      poll();var iv=setInterval(poll,8000);document.addEventListener('visibilitychange',poll);
+      return function(){stop=true;clearInterval(iv);};
+    }};}
+  };
+  CAN=true;SHARED=true;applyAccess();
+  DBH.collection('proj').onSnapshot(function(snap){
+    SYNC.q=SYNC.q.then(function(){return onRemote(snap);}).catch(function(){});
+  },function(){syncMsg('Cloud sync stopped. Reload the page to reconnect.');});
+  var ob=$('sbOut');if(ob){ob.hidden=false;ob.onclick=function(){SB.auth.signOut().then(function(){location.reload();});};}
+  syncMsg('Signed in. Projects are saved to the cloud.');
+}
+
 /* ================= Google Drive backup (through the viewer's own Google Drive connector) ================= */
 var GD='Google Drive',GDP='MEP-Progress-Backup-',MCP=null,gdBusy=false,gdAsk=null;
 function gdMsg(t){$('gdMsg').textContent=t||'';}
@@ -3178,7 +3243,7 @@ initPal();
 renderHome();
 showView('home');
 routeHash(true);
-initShare();
+if(window.claude&&window.claude.use)initShare();else{DL={save:function(o){return new Promise(function(res){var u=URL.createObjectURL(o.data),a=document.createElement('a');a.href=u;a.download=o.filename;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(u);a.remove();},1500);res();});}};$('pdfWrap').hidden=false;syncPdfSel();initSupabase();}
 initDrive();
 })();
 </script>
